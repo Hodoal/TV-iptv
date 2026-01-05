@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="application/vnd.apple.mpegurl">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Caracol TV Stream</title>
+</head>
+<body>
+<script>
+(async function() {
+    const CONFIG = {
+        SOURCE_URL: 'https://www.caracoltv.com/senal-vivo',
+        PROXY: 'https://api.allorigins.win/raw?url=',
+        CACHE_KEY: 'caracol_stream_cache',
+        CACHE_DURATION: 20 * 60 * 1000 // 20 minutos
+    };
+
+    // Obtener de localStorage si está disponible
+    function getCache() {
+        try {
+            const cache = localStorage.getItem(CONFIG.CACHE_KEY);
+            if (cache) {
+                const data = JSON.parse(cache);
+                const age = Date.now() - data.timestamp;
+                if (age < CONFIG.CACHE_DURATION) {
+                    return data.url;
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // Guardar en localStorage
+    function setCache(url) {
+        try {
+            localStorage.setItem(CONFIG.CACHE_KEY, JSON.stringify({
+                url: url,
+                timestamp: Date.now()
+            }));
+        } catch (e) {}
+    }
+
+    // Extraer URL del stream
+    async function extractUrl() {
+        try {
+            const response = await fetch(CONFIG.PROXY + encodeURIComponent(CONFIG.SOURCE_URL));
+            const html = await response.text();
+            
+            const patterns = [
+                /https:\/\/[^"'\s]*mdstrm\.com\/live-stream[^"'\s]*\.m3u8[^"'\s]*/i,
+                /"url":\s*"([^"]*mdstrm\.com[^"]*)"/i,
+                /"src":\s*"([^"]*mdstrm\.com[^"]*)"/i,
+                /'url':\s*'([^']*mdstrm\.com[^']*)'/i
+            ];
+            
+            for (const pattern of patterns) {
+                const match = html.match(pattern);
+                if (match) {
+                    const url = match[1] || match[0];
+                    if (url.includes('mdstrm.com') && url.includes('.m3u8')) {
+                        return url;
+                    }
+                }
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Generar M3U8
+    function generateM3U8(url) {
+        return `#EXTM3U
+#EXTINF:-1 tvg-id="caracol.co" tvg-name="Caracol TV" tvg-logo="https://upload.wikimedia.org/wikipedia/commons/thumb/c/c7/Caracol_Television_logo.svg/512px-Caracol_Television_logo.svg.png" group-title="Colombia",Caracol TV
+${url}`;
+    }
+
+    // Proceso principal
+    let streamUrl = getCache();
+    
+    if (!streamUrl) {
+        streamUrl = await extractUrl();
+        if (streamUrl) {
+            setCache(streamUrl);
+        }
+    }
+
+    // Mostrar resultado
+    const m3u8Content = streamUrl ? generateM3U8(streamUrl) : '#EXTM3U\n#EXTINF:-1,Error al obtener stream\n#';
+    
+    document.body.innerHTML = `<pre style="margin:0;padding:0;font-family:monospace;white-space:pre-wrap;">${m3u8Content}</pre>`;
+    
+    // Actualizar en segundo plano
+    setTimeout(async () => {
+        const newUrl = await extractUrl();
+        if (newUrl) {
+            setCache(newUrl);
+        }
+    }, 5000);
+
+})();
+</script>
+</body>
+</html>
