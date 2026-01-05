@@ -13,62 +13,111 @@
 (async function() {
     const CONFIG = {
         SOURCE_URL: 'https://www.caracoltv.com/senal-vivo',
-        PROXY: 'https://api.allorigins.win/raw?url=',
-        CACHE_KEY: 'caracol_stream_cache',
-        CACHE_DURATION: 20 * 60 * 1000 // 20 minutos
+        // Lista de proxies de respaldo
+        PROXIES: [
+            'https://corsproxy.io/?',
+            'https://api.allorigins.win/raw?url=',
+            'https://cors-anywhere.herokuapp.com/',
+            'https://api.codetabs.com/v1/proxy?quest='
+        ],
+        FALLBACK_URL: 'https://mdstrm.com/live-stream-playlist/574463697b9817cf0886fc17.m3u8', // URL base conocida
+        TIMEOUT: 15000
     };
 
-    // Obtener de localStorage si está disponible
-    function getCache() {
-        try {
-            const cache = localStorage.getItem(CONFIG.CACHE_KEY);
-            if (cache) {
-                const data = JSON.parse(cache);
-                const age = Date.now() - data.timestamp;
-                if (age < CONFIG.CACHE_DURATION) {
-                    return data.url;
+    // Función con timeout
+    function fetchWithTimeout(url, timeout = CONFIG.TIMEOUT) {
+        return Promise.race([
+            fetch(url),
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), timeout)
+            )
+        ]);
+    }
+
+    // Intentar extraer con diferentes proxies
+    async function extractUrlWithProxy() {
+        for (const proxy of CONFIG.PROXIES) {
+            try {
+                console.log('Intentando con proxy:', proxy);
+                const url = proxy + encodeURIComponent(CONFIG.SOURCE_URL);
+                const response = await fetchWithTimeout(url, 10000);
+                
+                if (!response.ok) continue;
+                
+                const html = await response.text();
+                const streamUrl = parseStreamUrl(html);
+                
+                if (streamUrl) {
+                    console.log('✓ Stream encontrado:', streamUrl);
+                    return streamUrl;
                 }
+            } catch (e) {
+                console.log('✗ Falló proxy:', proxy, e.message);
+                continue;
             }
-        } catch (e) {}
+        }
         return null;
     }
 
-    // Guardar en localStorage
-    function setCache(url) {
+    // Método alternativo: buscar directamente en la API de Mediastream
+    async function extractFromAPI() {
         try {
-            localStorage.setItem(CONFIG.CACHE_KEY, JSON.stringify({
-                url: url,
-                timestamp: Date.now()
-            }));
-        } catch (e) {}
-    }
-
-    // Extraer URL del stream
-    async function extractUrl() {
-        try {
-            const response = await fetch(CONFIG.PROXY + encodeURIComponent(CONFIG.SOURCE_URL));
-            const html = await response.text();
-            
-            const patterns = [
-                /https:\/\/[^"'\s]*mdstrm\.com\/live-stream[^"'\s]*\.m3u8[^"'\s]*/i,
-                /"url":\s*"([^"]*mdstrm\.com[^"]*)"/i,
-                /"src":\s*"([^"]*mdstrm\.com[^"]*)"/i,
-                /'url':\s*'([^']*mdstrm\.com[^']*)'/i
+            const apiUrls = [
+                'https://mdstrm.com/live-stream-playlist/574463697b9817cf0886fc17.m3u8',
+                'https://mdstrm.com/live-stream-playlist-v/574463697b9817cf0886fc17.m3u8'
             ];
             
-            for (const pattern of patterns) {
-                const match = html.match(pattern);
-                if (match) {
-                    const url = match[1] || match[0];
-                    if (url.includes('mdstrm.com') && url.includes('.m3u8')) {
-                        return url;
+            for (const url of apiUrls) {
+                try {
+                    const response = await fetchWithTimeout(url, 5000);
+                    if (response.ok) {
+                        const text = await response.text();
+                        // Buscar la URL del stream de mejor calidad
+                        const match = text.match(/https:\/\/[^\s]+\.m3u8[^\s]*/);
+                        if (match) {
+                            console.log('✓ Stream desde API:', match[0]);
+                            return match[0];
+                        }
                     }
+                } catch (e) {
+                    continue;
                 }
             }
-            return null;
         } catch (e) {
-            return null;
+            console.log('✗ Error en API method:', e.message);
         }
+        return null;
+    }
+
+    // Parsear HTML para extraer URL del stream
+    function parseStreamUrl(html) {
+        const patterns = [
+            // Patrón más específico primero
+            /https:\/\/co-[^"'\s]*mdstrm\.com\/live-stream[^"'\s]*\.m3u8[^"'\s]*/gi,
+            /https:\/\/[^"'\s]*mdstrm\.com\/live-stream-playlist[^"'\s]*\.m3u8/gi,
+            /https:\/\/[^"'\s]*mdstrm\.com[^"'\s]*\.m3u8[^"'\s]*/gi,
+            /"url"\s*:\s*"(https:\/\/[^"]*mdstrm\.com[^"]*)"/gi,
+            /"src"\s*:\s*"(https:\/\/[^"]*mdstrm\.com[^"]*)"/gi,
+            /'url'\s*:\s*'(https:\/\/[^']*mdstrm\.com[^']*)'/gi,
+            /src=["'](https:\/\/[^"']*mdstrm\.com[^"']*)["']/gi
+        ];
+        
+        for (const pattern of patterns) {
+            const matches = [...html.matchAll(pattern)];
+            for (const match of matches) {
+                const url = match[1] || match[0];
+                if (url && url.includes('mdstrm.com') && url.includes('.m3u8')) {
+                    // Limpiar la URL
+                    let cleanUrl = url.replace(/\\"/g, '"').replace(/\\/g, '');
+                    // Asegurarse de que tenga https://
+                    if (!cleanUrl.startsWith('http')) {
+                        cleanUrl = 'https://' + cleanUrl;
+                    }
+                    return cleanUrl;
+                }
+            }
+        }
+        return null;
     }
 
     // Generar M3U8
@@ -79,27 +128,44 @@ ${url}`;
     }
 
     // Proceso principal
-    let streamUrl = getCache();
-    
-    if (!streamUrl) {
-        streamUrl = await extractUrl();
-        if (streamUrl) {
-            setCache(streamUrl);
+    async function main() {
+        let streamUrl = null;
+
+        // Método 1: Extraer desde la página web con proxies
+        console.log('Método 1: Intentando extraer desde página web...');
+        streamUrl = await extractUrlWithProxy();
+
+        // Método 2: Si falla, intentar directamente desde API
+        if (!streamUrl) {
+            console.log('Método 2: Intentando desde API directa...');
+            streamUrl = await extractFromAPI();
         }
+
+        // Método 3: Usar URL base conocida
+        if (!streamUrl) {
+            console.log('Método 3: Usando URL base...');
+            streamUrl = CONFIG.FALLBACK_URL;
+        }
+
+        // Mostrar resultado
+        const m3u8Content = streamUrl 
+            ? generateM3U8(streamUrl) 
+            : `#EXTM3U
+#EXTINF:-1,Error: No se pudo obtener el stream
+# Por favor, intenta recargar la página en unos segundos`;
+
+        document.body.innerHTML = `<pre style="margin:0;padding:0;font-family:monospace;white-space:pre-wrap;font-size:12px;">${m3u8Content}</pre>`;
+
+        // Log para debug (visible en consola del navegador)
+        console.log('='.repeat(60));
+        console.log('CARACOL TV - RESULTADO FINAL');
+        console.log('='.repeat(60));
+        console.log(m3u8Content);
+        console.log('='.repeat(60));
     }
 
-    // Mostrar resultado
-    const m3u8Content = streamUrl ? generateM3U8(streamUrl) : '#EXTM3U\n#EXTINF:-1,Error al obtener stream\n#';
-    
-    document.body.innerHTML = `<pre style="margin:0;padding:0;font-family:monospace;white-space:pre-wrap;">${m3u8Content}</pre>`;
-    
-    // Actualizar en segundo plano
-    setTimeout(async () => {
-        const newUrl = await extractUrl();
-        if (newUrl) {
-            setCache(newUrl);
-        }
-    }, 5000);
+    // Ejecutar
+    main();
 
 })();
 </script>
